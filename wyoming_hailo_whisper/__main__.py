@@ -2,13 +2,15 @@
 import argparse
 import asyncio
 import logging
+import os
 import platform
 import re
 from functools import partial
-import os
-from wyoming_hailo_whisper.app.hailo_whisper_pipeline import HailoWhisperPipeline
+
 from wyoming.info import AsrModel, AsrProgram, Attribution, Info
 from wyoming.server import AsyncServer
+
+from wyoming_hailo_whisper.app.hailo_whisper_pipeline import HailoWhisperPipeline
 from wyoming_hailo_whisper.app.whisper_hef_registry import HEF_REGISTRY
 
 from . import __version__
@@ -65,8 +67,8 @@ async def main() -> None:
         help="Default language to set for transcription",
     )
     parser.add_argument(
-        "--multi-process-service", 
-        action="store_true", 
+        "--multi-process-service",
+        action="store_true",
         help="Enable multi-process service to run other models in addition to Whisper"
     )
     parser.add_argument("--debug", action="store_true", help="Log DEBUG messages")
@@ -94,8 +96,8 @@ async def main() -> None:
                 name="hailo-whisper",
                 description="Hailo accelerated Whisper",
                 attribution=Attribution(
-                    name="mpeex",
-                    url="https://github.com/mpeex/wyoming-hailo-whisper",
+                    name="stefanodesjo",
+                    url="https://github.com/stefanodesjo/wyoming-hailo-whisper",
                 ),
                 installed=True,
                 version=__version__,
@@ -108,7 +110,7 @@ async def main() -> None:
                             url="https://hailo.ai",
                         ),
                         installed=True,
-                        languages=["en"],
+                        languages=["sv"],
                         version=__version__,
                     )
                 ],
