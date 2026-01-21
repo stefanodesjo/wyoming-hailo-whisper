@@ -110,7 +110,7 @@ async def main() -> None:
                             url="https://hailo.ai",
                         ),
                         installed=True,
-                        languages=["sv"],
+                        languages=[args.language],
                         version=__version__,
                     )
                 ],
