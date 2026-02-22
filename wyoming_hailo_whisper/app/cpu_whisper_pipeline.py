@@ -47,9 +47,11 @@ class CpuWhisperPipeline:
                 _LOGGER.info("CPU decode: audio length=%.2fs, language=%s",
                              len(audio) / 16000, language)
 
-                input_features = self.processor(
+                inputs = self.processor(
                     audio, sampling_rate=16000, return_tensors="pt"
-                ).input_features
+                )
+                input_features = inputs.input_features
+                attention_mask = torch.ones(input_features.shape[:2], dtype=torch.long)
 
                 forced_decoder_ids = self.processor.get_decoder_prompt_ids(
                     language=language, task="transcribe"
@@ -58,6 +60,7 @@ class CpuWhisperPipeline:
                 with torch.no_grad():
                     generated_ids = self.model.generate(
                         input_features,
+                        attention_mask=attention_mask,
                         forced_decoder_ids=forced_decoder_ids,
                         num_beams=self.beam_size,
                         max_new_tokens=224,
