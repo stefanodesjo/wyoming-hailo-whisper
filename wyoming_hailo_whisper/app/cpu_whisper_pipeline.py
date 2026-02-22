@@ -39,13 +39,13 @@ class CpuWhisperPipeline:
     def _inference_loop(self):
         while self.running:
             try:
-                audio, language = self.data_queue.get(timeout=1)
+                audio, language, initial_prompt = self.data_queue.get(timeout=1)
             except Empty:
                 continue
 
             try:
-                _LOGGER.info("CPU decode: audio length=%.2fs, language=%s",
-                             len(audio) / 16000, language)
+                _LOGGER.info("CPU decode: audio length=%.2fs, language=%s, prompt='%s'",
+                             len(audio) / 16000, language, initial_prompt or "")
 
                 inputs = self.processor(
                     audio, sampling_rate=16000, return_tensors="pt"
@@ -57,13 +57,26 @@ class CpuWhisperPipeline:
                     language=language, task="transcribe"
                 )
 
+                generate_kwargs = dict(
+                    attention_mask=attention_mask,
+                    forced_decoder_ids=forced_decoder_ids,
+                    num_beams=self.beam_size,
+                    max_new_tokens=224,
+                )
+
+                if initial_prompt:
+                    prompt_token_ids = self.processor.tokenizer.encode(
+                        initial_prompt, add_special_tokens=False
+                    )
+                    generate_kwargs["prompt_ids"] = torch.tensor(
+                        prompt_token_ids, dtype=torch.long
+                    )
+                    _LOGGER.info("CPU prompt_ids: %d tokens", len(prompt_token_ids))
+
                 with torch.no_grad():
                     generated_ids = self.model.generate(
                         input_features,
-                        attention_mask=attention_mask,
-                        forced_decoder_ids=forced_decoder_ids,
-                        num_beams=self.beam_size,
-                        max_new_tokens=224,
+                        **generate_kwargs,
                     )
 
                 transcription = self.processor.batch_decode(
@@ -79,8 +92,8 @@ class CpuWhisperPipeline:
     def get_model_input_audio_length(self):
         return 30  # transformers handles up to 30s natively
 
-    def send_data(self, data, language="en"):
-        self.data_queue.put((data, language))
+    def send_data(self, data, language="en", initial_prompt=""):
+        self.data_queue.put((data, language, initial_prompt))
 
     def get_transcription(self):
         return self.results_queue.get()

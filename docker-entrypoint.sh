@@ -16,6 +16,10 @@ if [ "${WHISPER_ENHANCE_AUDIO:-false}" = "true" ]; then
     ARGS+=(--enhance-audio)
 fi
 
+if [ -n "${WHISPER_INITIAL_PROMPT:-}" ]; then
+    ARGS+=(--initial-prompt "${WHISPER_INITIAL_PROMPT}")
+fi
+
 if [ "${WHISPER_DEBUG:-true}" = "true" ]; then
     ARGS+=(--debug)
 fi

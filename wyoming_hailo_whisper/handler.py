@@ -2,6 +2,7 @@
 import argparse
 import asyncio
 import logging
+import time
 
 import numpy as np
 from wyoming.asr import Transcribe, Transcript
@@ -23,8 +24,10 @@ class HailoWhisperEventHandler(AsyncEventHandler):
         self,
         wyoming_info: Info,
         cli_args: argparse.Namespace,
-        model,
-        model_lock: asyncio.Lock,
+        hailo_model,
+        hailo_lock: asyncio.Lock,
+        cpu_model,
+        cpu_lock: asyncio.Lock,
         *args,
         **kwargs,
     ) -> None:
@@ -33,8 +36,10 @@ class HailoWhisperEventHandler(AsyncEventHandler):
         _LOGGER.debug(cli_args)
         self.cli_args = cli_args
         self.wyoming_info_event = wyoming_info.event()
-        self.model = model
-        self.model_lock = model_lock
+        self.hailo_model = hailo_model
+        self.hailo_lock = hailo_lock
+        self.cpu_model = cpu_model
+        self.cpu_lock = cpu_lock
         self.audio = bytes()
         self.audio_converter = AudioChunkConverter(
             rate=16000,
@@ -42,6 +47,48 @@ class HailoWhisperEventHandler(AsyncEventHandler):
             channels=1,
         )
         self._language = self.cli_args.language or "en"
+
+    def _hailo_transcribe(self, sampled_audio, chunk_offset):
+        """Run Hailo pipeline synchronously and return (text, elapsed_seconds)."""
+        t0 = time.monotonic()
+        chunk_length = self.hailo_model.get_model_input_audio_length()
+        mel_spectrograms = preprocess(
+            sampled_audio, True,
+            chunk_length=chunk_length,
+            chunk_offset=chunk_offset,
+        )
+        transcription = ""
+        _LOGGER.info("Hailo: processing %d mel spectrogram(s)", len(mel_spectrograms))
+        for mel in mel_spectrograms:
+            _LOGGER.info("Hailo mel shape: %s, min=%.4f, max=%.4f",
+                         mel.shape, mel.min(), mel.max())
+            self.hailo_model.send_data(mel, language=self._language, initial_prompt=self.cli_args.initial_prompt)
+            raw = self.hailo_model.get_transcription()
+            _LOGGER.info("Hailo raw: %s", raw)
+            transcription += clean_transcription(raw)
+        text = transcription.replace("[BLANK_AUDIO]", "").strip()
+        return text, time.monotonic() - t0
+
+    def _cpu_transcribe(self, sampled_audio, chunk_offset):
+        """Run CPU pipeline synchronously and return (text, elapsed_seconds)."""
+        t0 = time.monotonic()
+        offset_samples = int(chunk_offset * 16000)
+        trimmed_audio = sampled_audio[offset_samples:]
+        _LOGGER.info("CPU: sending %.2fs of audio", len(trimmed_audio) / 16000)
+        self.cpu_model.send_data(trimmed_audio, language=self._language, initial_prompt=self.cli_args.initial_prompt)
+        transcription = self.cpu_model.get_transcription()
+        text = transcription.replace("[BLANK_AUDIO]", "").strip()
+        return text, time.monotonic() - t0
+
+    async def _run_hailo(self, sampled_audio, chunk_offset):
+        """Run Hailo transcription behind its async lock, in a thread."""
+        async with self.hailo_lock:
+            return await asyncio.to_thread(self._hailo_transcribe, sampled_audio, chunk_offset)
+
+    async def _run_cpu(self, sampled_audio, chunk_offset):
+        """Run CPU transcription behind its async lock, in a thread."""
+        async with self.cpu_lock:
+            return await asyncio.to_thread(self._cpu_transcribe, sampled_audio, chunk_offset)
 
     async def handle_event(self, event: Event) -> bool:
         if AudioChunk.is_type(event.type):
@@ -71,42 +118,20 @@ class HailoWhisperEventHandler(AsyncEventHandler):
             if chunk_offset < 0:
                 chunk_offset = 0
 
+            # Run both pipelines in parallel for benchmarking
+            hailo_future = asyncio.ensure_future(self._run_hailo(sampled_audio, chunk_offset))
+            cpu_future = asyncio.ensure_future(self._run_cpu(sampled_audio, chunk_offset))
+            (hailo_text, hailo_elapsed), (cpu_text, cpu_elapsed) = await asyncio.gather(
+                hailo_future, cpu_future
+            )
+
+            _LOGGER.info("BENCHMARK Hailo (%s): %.2fs | '%s'",
+                         self.hailo_model.variant, hailo_elapsed, hailo_text)
+            _LOGGER.info("BENCHMARK CPU (%s): %.2fs | '%s'",
+                         self.cli_args.variant, cpu_elapsed, cpu_text)
+
             use_cpu = getattr(self.cli_args, 'use_cpu', False)
-
-            if use_cpu:
-                # CPU mode: send trimmed raw audio directly
-                offset_samples = int(chunk_offset * 16000)
-                trimmed_audio = sampled_audio[offset_samples:]
-                _LOGGER.info("CPU mode: sending %.2fs of audio", len(trimmed_audio) / 16000)
-
-                async with self.model_lock:
-                    self.model.send_data(trimmed_audio, language=self._language)
-                    transcription = self.model.get_transcription()
-
-                text = transcription.replace("[BLANK_AUDIO]", "").strip()
-            else:
-                # Hailo mode: generate mel spectrograms and process chunks
-                chunk_length = self.model.get_model_input_audio_length()
-
-                mel_spectrograms = preprocess(
-                    sampled_audio,
-                    True,
-                    chunk_length=chunk_length,
-                    chunk_offset=chunk_offset
-                )
-
-                async with self.model_lock:
-                    transcription = ""
-                    _LOGGER.info(f"Processing mel spectrograms: {len(mel_spectrograms)}")
-                    for mel in mel_spectrograms:
-                        _LOGGER.info("Processing mel spectrogram shape: %s, min=%.4f, max=%.4f",
-                                     mel.shape, mel.min(), mel.max())
-                        self.model.send_data(mel, language=self._language)
-                        raw_transcription = self.model.get_transcription()
-                        _LOGGER.info(raw_transcription)
-                        transcription += clean_transcription(raw_transcription)
-
-                text = transcription.replace("[BLANK_AUDIO]", "").strip()
+            text = cpu_text if use_cpu else hailo_text
 
             _LOGGER.info(text)
 

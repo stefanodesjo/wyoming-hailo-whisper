@@ -157,7 +157,7 @@ class HailoWhisperPipeline:
                     while self.running:
                         try:
                             # Wait for new data with a timeout to allow clean exit
-                            input_mel, language = self.data_queue.get(timeout=1)
+                            input_mel, language, initial_prompt = self.data_queue.get(timeout=1)
                         except Empty:
                             continue
 
@@ -185,6 +185,23 @@ class HailoWhisperPipeline:
                             notimestamps_token = 50363
 
                             prefix = [sot_token, language_token, transcribe_token, notimestamps_token]
+
+                            if initial_prompt:
+                                startofprev_token = 50361
+                                prompt_token_ids = self.tokenizer.encode(
+                                    initial_prompt, add_special_tokens=False
+                                )
+                                # Truncate prompt if prefix would exceed half the decoding sequence length
+                                max_prompt_tokens = self.decoding_sequence_length // 2 - len(prefix) - 1
+                                if len(prompt_token_ids) > max_prompt_tokens:
+                                    _LOGGER.warning(
+                                        "Truncating initial prompt from %d to %d tokens",
+                                        len(prompt_token_ids), max_prompt_tokens,
+                                    )
+                                    prompt_token_ids = prompt_token_ids[:max_prompt_tokens]
+                                prefix = [startofprev_token] + prompt_token_ids + prefix
+                                _LOGGER.info("Prompt prefix: %d prompt tokens + 4 control tokens", len(prompt_token_ids))
+
                             _LOGGER.info("Forced prefix: %s (language=%s)", prefix, language)
 
                             # Helper: run one decoder step and return raw logits at position
@@ -300,14 +317,15 @@ class HailoWhisperPipeline:
         """
         return self.input_audio_length
 
-    def send_data(self, data, language="en"):
+    def send_data(self, data, language="en", initial_prompt=""):
         """
         Send new data to the queue.
 
         :param data: Input data to process.
         :param language: Language code for transcription (e.g., "en", "sv").
+        :param initial_prompt: Optional text to condition the decoder.
         """
-        self.data_queue.put((data, language))
+        self.data_queue.put((data, language, initial_prompt))
 
     def get_transcription(self):
         """

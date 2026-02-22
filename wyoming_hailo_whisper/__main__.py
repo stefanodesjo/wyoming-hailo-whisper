@@ -87,6 +87,12 @@ async def main() -> None:
         action="store_true",
         help="Enable audio enhancement (high-pass filter, noise reduction, normalization)"
     )
+    parser.add_argument(
+        "--initial-prompt",
+        type=str,
+        default="",
+        help="Initial prompt to condition Whisper decoder (e.g. domain-specific vocabulary)"
+    )
     parser.add_argument("--debug", action="store_true", help="Log DEBUG messages")
     parser.add_argument(
         "--log-format", default=logging.BASIC_FORMAT, help="Format for log messages"
@@ -134,38 +140,46 @@ async def main() -> None:
         ],
     )
 
-    # Load model
+    # Load both pipelines for benchmark comparison
     _LOGGER.debug("Loading %s", model_name)
 
-    if args.use_cpu:
-        from wyoming_hailo_whisper.app.cpu_whisper_pipeline import CpuWhisperPipeline
-        whisper_model = CpuWhisperPipeline(variant=args.variant, beam_size=args.beam_size)
-        _LOGGER.info("Mode: CPU (beam_size=%d)", args.beam_size)
-    else:
-        hailo_variants = {"tiny", "base"}
-        if args.variant not in hailo_variants:
-            parser.error(f"Hailo mode only supports variants {sorted(hailo_variants)}. Use --use-cpu for '{args.variant}'.")
-        encoder_path = get_hef_path(args.variant, args.device, "encoder")
-        decoder_path = get_hef_path(args.variant, args.device, "decoder")
-        whisper_model = HailoWhisperPipeline(encoder_path, decoder_path, args.variant, multi_process_service=args.multi_process_service, beam_size=args.beam_size)
-        _LOGGER.info("Mode: Hailo")
-        _LOGGER.info("Device %s", args.device)
-        _LOGGER.info("Encoder %s", encoder_path)
-        _LOGGER.info("Decoder %s", decoder_path)
+    # Hailo pipeline: uses --variant if tiny/base, otherwise falls back to base
+    hailo_variant = args.variant if args.variant in ("tiny", "base") else "base"
+    encoder_path = get_hef_path(hailo_variant, args.device, "encoder")
+    decoder_path = get_hef_path(hailo_variant, args.device, "decoder")
+    hailo_model = HailoWhisperPipeline(
+        encoder_path, decoder_path, hailo_variant,
+        multi_process_service=args.multi_process_service,
+        beam_size=args.beam_size,
+    )
+    _LOGGER.info("Hailo pipeline loaded (%s, beam_size=%d)", hailo_variant, args.beam_size)
+    _LOGGER.info("Device %s", args.device)
+    _LOGGER.info("Encoder %s", encoder_path)
+    _LOGGER.info("Decoder %s", decoder_path)
 
+    # CPU pipeline: uses user's --variant
+    from wyoming_hailo_whisper.app.cpu_whisper_pipeline import CpuWhisperPipeline
+    cpu_model = CpuWhisperPipeline(variant=args.variant, beam_size=args.beam_size)
+    _LOGGER.info("CPU pipeline loaded (%s, beam_size=%d)", args.variant, args.beam_size)
+
+    selected = "CPU" if args.use_cpu else "Hailo"
+    _LOGGER.info("Selected mode: %s", selected)
     _LOGGER.info("Language %s", args.language)
-    _LOGGER.info("Variant %s", args.variant)
+
+    hailo_lock = asyncio.Lock()
+    cpu_lock = asyncio.Lock()
 
     server = AsyncServer.from_uri(args.uri)
     _LOGGER.info("Ready")
-    model_lock = asyncio.Lock()
     await server.run(
         partial(
             HailoWhisperEventHandler,
             wyoming_info,
             args,
-            whisper_model,
-            model_lock,
+            hailo_model,
+            hailo_lock,
+            cpu_model,
+            cpu_lock,
         )
     )
 
