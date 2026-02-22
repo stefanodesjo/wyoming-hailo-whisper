@@ -15,7 +15,7 @@ class HailoWhisperPipeline:
     A pipeline for running inference using Hailo's Whisper models.
     """
 
-    def __init__(self, encoder_model_path: str, decoder_model_path: str, variant, host="arm64", multi_process_service=False):
+    def __init__(self, encoder_model_path: str, decoder_model_path: str, variant, host="arm64", multi_process_service=False, beam_size=1):
         """
         Initialize the pipeline.
 
@@ -31,6 +31,7 @@ class HailoWhisperPipeline:
         self.decoding_sequence_length = None  # set automatically based on HEF details
         self.host = host  # not used in this version
         self.multi_process_service = multi_process_service
+        self.beam_size = beam_size
 
         # Token embedding (ensure float32 for Hailo compatibility)
         self.token_embedding_weight = self._load_token_embedding_weight().astype(np.float32)
@@ -186,71 +187,102 @@ class HailoWhisperPipeline:
                             prefix = [sot_token, language_token, transcribe_token, notimestamps_token]
                             _LOGGER.info("Forced prefix: %s (language=%s)", prefix, language)
 
-                            decoder_input_ids = np.zeros((1, self.decoding_sequence_length), dtype=np.int64)
-                            for j, tok in enumerate(prefix):
-                                decoder_input_ids[0][j] = tok
+                            # Helper: run one decoder step and return raw logits at position
+                            def run_decoder_step(beam_ids, pos):
+                                tok_emb = self._tokenization(beam_ids, add_embed=True)
+                                decoder_bindings.input(f"{decoder_model_name}/input_layer1").set_buffer(encoded_features)
+                                decoder_bindings.input(f"{decoder_model_name}/input_layer2").set_buffer(tok_emb)
+                                bufs = [np.zeros(decoder_infer_model.output(n).shape, dtype=np.float32) for n in sorted_output_names]
+                                for n, b in zip(sorted_output_names, bufs):
+                                    decoder_bindings.output(n).set_buffer(b)
+                                decoder_configured_infer_model.run([decoder_bindings], self.timeout_ms)
+                                return np.concatenate(
+                                    [decoder_bindings.output(n).get_buffer() for n in useful_outputs], axis=2
+                                )[:, pos]
 
-                            generated_tokens = list(prefix[1:])  # all tokens for final decode
-                            content_tokens = []  # content-only for repetition penalty
-                            token_logits = []  # track confidence of selected tokens
+                            beam_size = self.beam_size
+                            length_penalty_alpha = 0.6
                             first_decode_pos = len(prefix) - 1
 
-                            # Run Decoder Iteratively (skip forced prefix positions)
+                            # Initialize beams
+                            initial_ids = np.zeros((1, self.decoding_sequence_length), dtype=np.int64)
+                            for j, tok in enumerate(prefix):
+                                initial_ids[0][j] = tok
+
+                            active_beams = [{
+                                'ids': initial_ids,
+                                'tokens': list(prefix[1:]),
+                                'content': [],
+                                'score': 0.0,
+                            }]
+                            finished_beams = []
+                            _LOGGER.info("Decoding with beam_size=%d", beam_size)
+
+                            # Beam search decoding loop
                             for i in range(first_decode_pos, self.decoding_sequence_length - 1):
-                                tokenized_ids = self._tokenization(decoder_input_ids, add_embed=True)
+                                all_candidates = []
 
-                                if i == first_decode_pos:
-                                    _LOGGER.info("Tokenized ids shape: %s, dtype=%s, min=%.6f, max=%.6f, mean=%.6f",
-                                                 tokenized_ids.shape, tokenized_ids.dtype, tokenized_ids.min(),
-                                                 tokenized_ids.max(), tokenized_ids.mean())
+                                for beam in active_beams:
+                                    raw_logits = run_decoder_step(beam['ids'], i)
 
-                                decoder_bindings.input(f"{decoder_model_name}/input_layer1").set_buffer(encoded_features)
-                                decoder_bindings.input(f"{decoder_model_name}/input_layer2").set_buffer(tokenized_ids)
+                                    content_count = i - first_decode_pos
+                                    logits = apply_repetition_penalty(raw_logits, beam['content'], penalty=1.5)
+                                    logits = suppress_special_tokens(logits, allow_eot=content_count >= 1)
 
-                                buffers = [
-                                    np.zeros(decoder_infer_model.output(name).shape).astype(np.float32) for name in sorted_output_names
-                                ]
+                                    # Log softmax for beam scoring
+                                    max_l = np.max(logits)
+                                    log_probs = logits - max_l - np.log(np.sum(np.exp(logits - max_l)))
 
-                                for name, buf in zip(sorted_output_names, buffers):
-                                    decoder_bindings.output(name).set_buffer(buf)
+                                    # Top candidates per beam
+                                    top_k = beam_size * 2
+                                    top_indices = np.argsort(log_probs)[-top_k:][::-1]
 
-                                decoder_configured_infer_model.run([decoder_bindings], self.timeout_ms)
+                                    if i == first_decode_pos and beam is active_beams[0]:
+                                        top5 = top_indices[:5]
+                                        top5_tokens = [self.tokenizer.decode([idx]) for idx in top5]
+                                        _LOGGER.info("Step %d: top5=%s ids=%s scores=%.2f..%.2f",
+                                                     i, top5_tokens, top5.tolist(),
+                                                     float(log_probs[top5[0]]), float(log_probs[top5[-1]]))
 
-                                decoder_outputs = np.concatenate(
-                                    [decoder_bindings.output(name).get_buffer() for name in useful_outputs], axis=2
-                                )
+                                    for idx_np in top_indices:
+                                        idx = int(idx_np)
+                                        new_ids = beam['ids'].copy()
+                                        new_ids[0][i + 1] = idx
+                                        new_beam = {
+                                            'ids': new_ids,
+                                            'tokens': beam['tokens'] + [idx],
+                                            'content': beam['content'] + [idx],
+                                            'score': beam['score'] + float(log_probs[idx]),
+                                        }
+                                        if idx == WHISPER_EOT_TOKEN:
+                                            finished_beams.append(new_beam)
+                                        else:
+                                            all_candidates.append(new_beam)
 
-                                if i == first_decode_pos:
-                                    _LOGGER.info("Decoder output shape (concat): %s", decoder_outputs.shape)
+                                # Keep top beam_size active beams by score
+                                all_candidates.sort(key=lambda b: b['score'], reverse=True)
+                                active_beams = all_candidates[:beam_size]
 
-                                # Decoder post-processing — use content_tokens only for penalty
-                                content_tokens_generated = i - first_decode_pos
-                                repetition_penalty = 1.5
-                                logits = apply_repetition_penalty(decoder_outputs[:, i], content_tokens, penalty=repetition_penalty)
-
-                                # Suppress non-text special tokens during content generation
-                                # Allow EOT only after at least 1 content token
-                                allow_eot = content_tokens_generated >= 1
-                                logits = suppress_special_tokens(logits, allow_eot=allow_eot)
-
-                                top5_indices = np.argsort(logits)[-5:][::-1]
-                                top5_values = logits[top5_indices]
-                                top5_tokens = [self.tokenizer.decode([idx]) for idx in top5_indices]
-                                _LOGGER.info("Step %d: top5 tokens=%s ids=%s logits=%s",
-                                             i, top5_tokens, top5_indices.tolist(), top5_values.tolist())
-                                next_token = int(np.argmax(logits))
-                                token_logits.append(float(logits[next_token]))
-
-                                generated_tokens.append(next_token)
-                                content_tokens.append(next_token)
-                                decoder_input_ids[0][i + 1] = np.array([[next_token]], dtype=np.int64)
-
-                                if next_token == WHISPER_EOT_TOKEN:
+                                if not active_beams:
                                     break
 
-                            # Convert token IDs to text
-                            avg_logit = np.mean(token_logits) if token_logits else 0.0
-                            _LOGGER.info("Generated tokens: %s (avg_logit=%.2f)", generated_tokens, avg_logit)
+                                # Early stop if enough finished beams collected
+                                if len(finished_beams) >= beam_size:
+                                    break
+
+                            # Select best beam with length-normalized score
+                            all_beams = finished_beams + active_beams
+                            def beam_score(b):
+                                length = max(len(b['content']), 1)
+                                return b['score'] / (length ** length_penalty_alpha)
+
+                            best = max(all_beams, key=beam_score)
+                            generated_tokens = best['tokens']
+
+                            _LOGGER.info("Beam search: %d finished, %d active, best_score=%.2f, length=%d",
+                                         len(finished_beams), len(active_beams),
+                                         beam_score(best), len(best['content']))
+                            _LOGGER.info("Generated tokens: %s", generated_tokens)
                             transcription = self.tokenizer.decode(
                                 generated_tokens, skip_special_tokens=True
                             )

@@ -79,8 +79,8 @@ async def main() -> None:
     parser.add_argument(
         "--beam-size",
         type=int,
-        default=5,
-        help="Beam size for CPU decoding (default: 5, only used with --use-cpu)"
+        default=1,
+        help="Beam size for decoding (default: 1 = greedy). Higher values improve accuracy at cost of speed. Works with both Hailo and CPU modes."
     )
     parser.add_argument("--debug", action="store_true", help="Log DEBUG messages")
     parser.add_argument(
@@ -139,7 +139,7 @@ async def main() -> None:
     else:
         encoder_path = get_hef_path(args.variant, args.device, "encoder")
         decoder_path = get_hef_path(args.variant, args.device, "decoder")
-        whisper_model = HailoWhisperPipeline(encoder_path, decoder_path, args.variant, multi_process_service=args.multi_process_service)
+        whisper_model = HailoWhisperPipeline(encoder_path, decoder_path, args.variant, multi_process_service=args.multi_process_service, beam_size=args.beam_size)
         _LOGGER.info("Mode: Hailo")
         _LOGGER.info("Device %s", args.device)
         _LOGGER.info("Encoder %s", encoder_path)
