@@ -71,6 +71,17 @@ async def main() -> None:
         action="store_true",
         help="Enable multi-process service to run other models in addition to Whisper"
     )
+    parser.add_argument(
+        "--use-cpu",
+        action="store_true",
+        help="Use CPU for inference instead of Hailo (slower but more accurate)"
+    )
+    parser.add_argument(
+        "--beam-size",
+        type=int,
+        default=5,
+        help="Beam size for CPU decoding (default: 5, only used with --use-cpu)"
+    )
     parser.add_argument("--debug", action="store_true", help="Log DEBUG messages")
     parser.add_argument(
         "--log-format", default=logging.BASIC_FORMAT, help="Format for log messages"
@@ -120,13 +131,20 @@ async def main() -> None:
 
     # Load model
     _LOGGER.debug("Loading %s", model_name)
-    encoder_path = get_hef_path(args.variant, args.device, "encoder")
-    decoder_path = get_hef_path(args.variant, args.device, "decoder")
 
-    whisper_model = HailoWhisperPipeline(encoder_path, decoder_path, args.variant, multi_process_service=args.multi_process_service)
-    _LOGGER.info("Device %s", args.device)
-    _LOGGER.info("Encoder %s", encoder_path)
-    _LOGGER.info("Decoder %s", decoder_path)
+    if args.use_cpu:
+        from wyoming_hailo_whisper.app.cpu_whisper_pipeline import CpuWhisperPipeline
+        whisper_model = CpuWhisperPipeline(variant=args.variant, beam_size=args.beam_size)
+        _LOGGER.info("Mode: CPU (beam_size=%d)", args.beam_size)
+    else:
+        encoder_path = get_hef_path(args.variant, args.device, "encoder")
+        decoder_path = get_hef_path(args.variant, args.device, "decoder")
+        whisper_model = HailoWhisperPipeline(encoder_path, decoder_path, args.variant, multi_process_service=args.multi_process_service)
+        _LOGGER.info("Mode: Hailo")
+        _LOGGER.info("Device %s", args.device)
+        _LOGGER.info("Encoder %s", encoder_path)
+        _LOGGER.info("Decoder %s", decoder_path)
+
     _LOGGER.info("Language %s", args.language)
     _LOGGER.info("Variant %s", args.variant)
 

@@ -10,7 +10,6 @@ from wyoming.event import Event
 from wyoming.info import Describe, Info
 from wyoming.server import AsyncEventHandler
 
-from wyoming_hailo_whisper.app.hailo_whisper_pipeline import HailoWhisperPipeline
 from wyoming_hailo_whisper.common.postprocessing import clean_transcription
 from wyoming_hailo_whisper.common.preprocessing import improve_input_audio, preprocess
 
@@ -24,10 +23,9 @@ class HailoWhisperEventHandler(AsyncEventHandler):
         self,
         wyoming_info: Info,
         cli_args: argparse.Namespace,
-        model: HailoWhisperPipeline,
+        model,
         model_lock: asyncio.Lock,
         *args,
-        #initial_prompt: Optional[str] = None,
         **kwargs,
     ) -> None:
         super().__init__(*args, **kwargs)
@@ -72,27 +70,42 @@ class HailoWhisperEventHandler(AsyncEventHandler):
             if chunk_offset < 0:
                 chunk_offset = 0
 
-            chunk_length = self.model.get_model_input_audio_length()
+            use_cpu = getattr(self.cli_args, 'use_cpu', False)
 
-            mel_spectrograms = preprocess(
-                sampled_audio,
-                True,
-                chunk_length=chunk_length,
-                chunk_offset=chunk_offset
-            )
+            if use_cpu:
+                # CPU mode: send trimmed raw audio directly
+                offset_samples = int(chunk_offset * 16000)
+                trimmed_audio = sampled_audio[offset_samples:]
+                _LOGGER.info("CPU mode: sending %.2fs of audio", len(trimmed_audio) / 16000)
 
-            async with self.model_lock:
-                transcription = ""
-                _LOGGER.info(f"Processing mel spectrograms: {len(mel_spectrograms)}")
-                for mel in mel_spectrograms:
-                    _LOGGER.info("Processing mel spectrogram shape: %s, min=%.4f, max=%.4f",
-                                 mel.shape, mel.min(), mel.max())
-                    self.model.send_data(mel, language=self._language)
-                    raw_transcription = self.model.get_transcription()
-                    _LOGGER.info(raw_transcription)
-                    transcription += clean_transcription(raw_transcription)
+                async with self.model_lock:
+                    self.model.send_data(trimmed_audio, language=self._language)
+                    transcription = self.model.get_transcription()
 
-            text = transcription.replace("[BLANK_AUDIO]", "").strip()
+                text = transcription.replace("[BLANK_AUDIO]", "").strip()
+            else:
+                # Hailo mode: generate mel spectrograms and process chunks
+                chunk_length = self.model.get_model_input_audio_length()
+
+                mel_spectrograms = preprocess(
+                    sampled_audio,
+                    True,
+                    chunk_length=chunk_length,
+                    chunk_offset=chunk_offset
+                )
+
+                async with self.model_lock:
+                    transcription = ""
+                    _LOGGER.info(f"Processing mel spectrograms: {len(mel_spectrograms)}")
+                    for mel in mel_spectrograms:
+                        _LOGGER.info("Processing mel spectrogram shape: %s, min=%.4f, max=%.4f",
+                                     mel.shape, mel.min(), mel.max())
+                        self.model.send_data(mel, language=self._language)
+                        raw_transcription = self.model.get_transcription()
+                        _LOGGER.info(raw_transcription)
+                        transcription += clean_transcription(raw_transcription)
+
+                text = transcription.replace("[BLANK_AUDIO]", "").strip()
 
             _LOGGER.info(text)
 
