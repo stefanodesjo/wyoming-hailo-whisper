@@ -88,7 +88,7 @@ class HailoWhisperEventHandler(AsyncEventHandler):
                 for mel in mel_spectrograms:
                     _LOGGER.info("Processing mel spectrogram shape: %s, min=%.4f, max=%.4f",
                                  mel.shape, mel.min(), mel.max())
-                    self.model.send_data(mel)
+                    self.model.send_data(mel, language=self._language)
                     time.sleep(0.2)
                     raw_transcription = self.model.get_transcription()
                     _LOGGER.info(raw_transcription)

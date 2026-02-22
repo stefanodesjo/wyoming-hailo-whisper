@@ -160,7 +160,7 @@ class HailoWhisperPipeline:
                     while self.running:
                         try:
                             # Wait for new data with a timeout to allow clean exit
-                            input_mel = self.data_queue.get(timeout=1)
+                            input_mel, language = self.data_queue.get(timeout=1)
                         except Empty:
                             continue
 
@@ -178,19 +178,27 @@ class HailoWhisperPipeline:
                                          encoded_features.min(), encoded_features.max(),
                                          encoded_features.mean(), encoded_features.std())
 
-                            # Decoder
-                            start_token_id = [50258]
-                            decoder_input_ids = np.array(
-                                [[start_token_id[0]]], dtype=np.int64
-                            )  # Shape (1,1)
-                            decoder_input_ids = np.concatenate(
-                                [decoder_input_ids, np.zeros((1, self.decoding_sequence_length - 1), dtype=np.int64)], axis=1
-                            )
+                            # Build forced Whisper prefix: SOT, language, transcribe, notimestamps
+                            sot_token = 50258
+                            language_token = self.tokenizer.convert_tokens_to_ids(f"<|{language}|>")
+                            if language_token is None or language_token == self.tokenizer.unk_token_id:
+                                _LOGGER.warning("Unknown language '%s', falling back to English", language)
+                                language_token = 50259  # <|en|>
+                            transcribe_token = 50359
+                            notimestamps_token = 50363
 
-                            generated_tokens = []
-                            decoder_outputs = None
-                            # Run Decoder Iteratively
-                            for i in range(self.decoding_sequence_length - 1):
+                            prefix = [sot_token, language_token, transcribe_token, notimestamps_token]
+                            _LOGGER.info("Forced prefix: %s (language=%s)", prefix, language)
+
+                            decoder_input_ids = np.zeros((1, self.decoding_sequence_length), dtype=np.int64)
+                            for j, tok in enumerate(prefix):
+                                decoder_input_ids[0][j] = tok
+
+                            generated_tokens = list(prefix[1:])  # track for repetition penalty
+                            first_decode_pos = len(prefix) - 1
+
+                            # Run Decoder Iteratively (skip forced prefix positions)
+                            for i in range(first_decode_pos, self.decoding_sequence_length - 1):
                                 tokenized_ids = self._tokenization(decoder_input_ids, add_embed=False)
 
                                 decoder_bindings.input(f"{decoder_model_name}/input_layer1").set_buffer(encoded_features)
@@ -209,9 +217,8 @@ class HailoWhisperPipeline:
                                     [decoder_bindings.output(name).get_buffer() for name in useful_outputs], axis=2
                                 )
 
-                                if i == 0:
+                                if i == first_decode_pos:
                                     _LOGGER.info("Decoder output shape (concat): %s", decoder_outputs.shape)
-                                    _LOGGER.info("Tokenized ids shape: %s", tokenized_ids.shape)
 
                                 # Decoder post-processing
                                 repetition_penalty = 1.5
@@ -248,13 +255,14 @@ class HailoWhisperPipeline:
         """
         return self.input_audio_length
 
-    def send_data(self, data):
+    def send_data(self, data, language="en"):
         """
         Send new data to the queue.
 
         :param data: Input data to process.
+        :param language: Language code for transcription (e.g., "en", "sv").
         """
-        self.data_queue.put(data)
+        self.data_queue.put((data, language))
 
     def get_transcription(self):
         """
