@@ -91,7 +91,13 @@ async def main() -> None:
         "--initial-prompt",
         type=str,
         default="",
-        help="Initial prompt to condition Whisper decoder (e.g. domain-specific vocabulary)"
+        help="Initial prompt to condition Whisper decoder for CPU pipeline"
+    )
+    parser.add_argument(
+        "--hailo-initial-prompt",
+        type=str,
+        default="",
+        help="Initial prompt for Hailo pipeline (shorter due to fixed decoder sequence length)"
     )
     parser.add_argument("--debug", action="store_true", help="Log DEBUG messages")
     parser.add_argument(

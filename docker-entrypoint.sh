@@ -20,6 +20,10 @@ if [ -n "${WHISPER_INITIAL_PROMPT:-}" ]; then
     ARGS+=(--initial-prompt "${WHISPER_INITIAL_PROMPT}")
 fi
 
+if [ -n "${WHISPER_HAILO_INITIAL_PROMPT:-}" ]; then
+    ARGS+=(--hailo-initial-prompt "${WHISPER_HAILO_INITIAL_PROMPT}")
+fi
+
 if [ "${WHISPER_DEBUG:-true}" = "true" ]; then
     ARGS+=(--debug)
 fi
