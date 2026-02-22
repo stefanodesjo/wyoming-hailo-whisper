@@ -33,8 +33,7 @@ class HailoWhisperEventHandler(AsyncEventHandler):
     ) -> None:
         super().__init__(*args, **kwargs)
 
-        _LOGGER.info(cli_args)
-        _LOGGER.info(model)
+        _LOGGER.debug(cli_args)
         self.cli_args = cli_args
         self.wyoming_info_event = wyoming_info.event()
         self.model = model
@@ -87,7 +86,8 @@ class HailoWhisperEventHandler(AsyncEventHandler):
                 transcription = ""
                 _LOGGER.info(f"Processing mel spectrograms: {len(mel_spectrograms)}")
                 for mel in mel_spectrograms:
-                    _LOGGER.info(f"Processing mel spectrogram: {mel}")
+                    _LOGGER.info("Processing mel spectrogram shape: %s, min=%.4f, max=%.4f",
+                                 mel.shape, mel.min(), mel.max())
                     self.model.send_data(mel)
                     time.sleep(0.2)
                     raw_transcription = self.model.get_transcription()

@@ -37,6 +37,8 @@ class HailoWhisperPipeline:
         self.onnx_add_input = self._load_onnx_add_input()
 
         self.constant_output_0 = np.array([1])  # Unsqueeze axis
+        _LOGGER.info("Token embedding weight shape: %s", self.token_embedding_weight.shape)
+        _LOGGER.info("ONNX add input shape: %s", self.onnx_add_input.shape)
         self._load_tokenizer()
 
         encoder_hef = HEF(self.encoder_model_path)  # load HEF to get input length
@@ -145,6 +147,10 @@ class HailoWhisperPipeline:
 
             _LOGGER.info("Encoder input shape: %s", encoder_infer_model.input().shape)
             _LOGGER.info("Encoder output shape: %s", encoder_infer_model.output().shape)
+            _LOGGER.info("Decoder input_layer1 shape: %s", decoder_infer_model.input(f"{decoder_model_name}/input_layer1").shape)
+            _LOGGER.info("Decoder input_layer2 shape: %s", decoder_infer_model.input(f"{decoder_model_name}/input_layer2").shape)
+            for oname in sorted_output_names:
+                _LOGGER.info("Decoder output '%s' shape: %s", oname, decoder_infer_model.output(oname).shape)
 
             with encoder_infer_model.configure() as encoder_configured_infer_model:
                 with decoder_infer_model.configure() as decoder_configured_infer_model:
@@ -168,6 +174,9 @@ class HailoWhisperPipeline:
                             encoder_configured_infer_model.run([encoder_bindings], self.timeout_ms)
                             encoded_features = encoder_bindings.output().get_buffer()
                             _LOGGER.info("Encoded features shape: %s", encoded_features.shape)
+                            _LOGGER.info("Encoded features stats: min=%.6f, max=%.6f, mean=%.6f, std=%.6f",
+                                         encoded_features.min(), encoded_features.max(),
+                                         encoded_features.mean(), encoded_features.std())
 
                             # Decoder
                             start_token_id = [50258]
@@ -200,9 +209,18 @@ class HailoWhisperPipeline:
                                     [decoder_bindings.output(name).get_buffer() for name in useful_outputs], axis=2
                                 )
 
+                                if i == 0:
+                                    _LOGGER.info("Decoder output shape (concat): %s", decoder_outputs.shape)
+                                    _LOGGER.info("Tokenized ids shape: %s", tokenized_ids.shape)
+
                                 # Decoder post-processing
                                 repetition_penalty = 1.5
                                 logits = apply_repetition_penalty(decoder_outputs[:, i], generated_tokens, penalty=repetition_penalty)
+                                top5_indices = np.argsort(logits)[-5:][::-1]
+                                top5_values = logits[top5_indices]
+                                top5_tokens = [self.tokenizer.decode([idx]) for idx in top5_indices]
+                                _LOGGER.info("Step %d: top5 tokens=%s ids=%s logits=%s",
+                                             i, top5_tokens, top5_indices.tolist(), top5_values.tolist())
                                 next_token = np.argmax(logits)
 
                                 generated_tokens.append(next_token)
