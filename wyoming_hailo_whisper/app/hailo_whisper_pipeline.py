@@ -32,9 +32,9 @@ class HailoWhisperPipeline:
         self.host = host  # not used in this version
         self.multi_process_service = multi_process_service
 
-        # Token embedding
-        self.token_embedding_weight = self._load_token_embedding_weight()
-        self.onnx_add_input = self._load_onnx_add_input()
+        # Token embedding (ensure float32 for Hailo compatibility)
+        self.token_embedding_weight = self._load_token_embedding_weight().astype(np.float32)
+        self.onnx_add_input = self._load_onnx_add_input().astype(np.float32)
 
         self.constant_output_0 = np.array([1])  # Unsqueeze axis
         _LOGGER.info("Token embedding weight shape: %s", self.token_embedding_weight.shape)
@@ -80,23 +80,19 @@ class HailoWhisperPipeline:
 
         :param decoder_input_ids: Input token IDs for the decoder.
         :param add_embed: Whether to add positional embedding bias.
-        :return: Transposed tokenized output.
+        :return: Contiguous float32 array ready for Hailo set_buffer.
         """
         # embedding lookup
-        gather_output = self.token_embedding_weight[decoder_input_ids]  # Shape: (len(decoder_input_ids), 384)
+        gather_output = self.token_embedding_weight[decoder_input_ids]
 
         if add_embed:
-            # Add bias
-            add_output = gather_output + self.onnx_add_input  # Broadcasting with shape (32, 384)
-            # insert dimension at axis=1
-            unsqueeze_output = np.expand_dims(add_output, axis=int(self.constant_output_0[0]))  # Shape: (32, 1, 384)
-            # Transpose (0, 3, 2, 1) + turn into NHWC (0, 2, 3, 1)
+            add_output = gather_output + self.onnx_add_input
+            unsqueeze_output = np.expand_dims(add_output, axis=int(self.constant_output_0[0]))
             transpose_output = np.transpose(unsqueeze_output, (0, 2, 1, 3))
-            return transpose_output
+            return np.ascontiguousarray(transpose_output, dtype=np.float32)
         else:
-            # insert dimension at axis=0
             unsqueeze_output = np.expand_dims(gather_output, axis=0)
-            return unsqueeze_output
+            return np.ascontiguousarray(unsqueeze_output, dtype=np.float32)
 
     def _inference_loop(self):
         """
@@ -165,7 +161,7 @@ class HailoWhisperPipeline:
                             continue
 
                         try:
-                            input_mel = np.ascontiguousarray(input_mel)
+                            input_mel = np.ascontiguousarray(input_mel, dtype=np.float32)
                             _LOGGER.info("Input mel shape: %s", input_mel.shape)
                             encoder_bindings.input().set_buffer(input_mel)
                             buffer = np.zeros(encoder_infer_model.output().shape).astype(np.float32)
@@ -194,7 +190,9 @@ class HailoWhisperPipeline:
                             for j, tok in enumerate(prefix):
                                 decoder_input_ids[0][j] = tok
 
-                            generated_tokens = list(prefix[1:])  # track for repetition penalty
+                            generated_tokens = list(prefix[1:])  # all tokens for final decode
+                            content_tokens = []  # content-only for repetition penalty
+                            token_logits = []  # track confidence of selected tokens
                             first_decode_pos = len(prefix) - 1
 
                             # Run Decoder Iteratively (skip forced prefix positions)
@@ -202,8 +200,8 @@ class HailoWhisperPipeline:
                                 tokenized_ids = self._tokenization(decoder_input_ids, add_embed=True)
 
                                 if i == first_decode_pos:
-                                    _LOGGER.info("Tokenized ids shape: %s, min=%.6f, max=%.6f, mean=%.6f",
-                                                 tokenized_ids.shape, tokenized_ids.min(),
+                                    _LOGGER.info("Tokenized ids shape: %s, dtype=%s, min=%.6f, max=%.6f, mean=%.6f",
+                                                 tokenized_ids.shape, tokenized_ids.dtype, tokenized_ids.min(),
                                                  tokenized_ids.max(), tokenized_ids.mean())
 
                                 decoder_bindings.input(f"{decoder_model_name}/input_layer1").set_buffer(encoded_features)
@@ -225,10 +223,10 @@ class HailoWhisperPipeline:
                                 if i == first_decode_pos:
                                     _LOGGER.info("Decoder output shape (concat): %s", decoder_outputs.shape)
 
-                                # Decoder post-processing
+                                # Decoder post-processing — use content_tokens only for penalty
                                 content_tokens_generated = i - first_decode_pos
                                 repetition_penalty = 1.5
-                                logits = apply_repetition_penalty(decoder_outputs[:, i], generated_tokens, penalty=repetition_penalty)
+                                logits = apply_repetition_penalty(decoder_outputs[:, i], content_tokens, penalty=repetition_penalty)
 
                                 # Suppress non-text special tokens during content generation
                                 # Allow EOT only after at least 1 content token
@@ -240,16 +238,19 @@ class HailoWhisperPipeline:
                                 top5_tokens = [self.tokenizer.decode([idx]) for idx in top5_indices]
                                 _LOGGER.info("Step %d: top5 tokens=%s ids=%s logits=%s",
                                              i, top5_tokens, top5_indices.tolist(), top5_values.tolist())
-                                next_token = np.argmax(logits)
+                                next_token = int(np.argmax(logits))
+                                token_logits.append(float(logits[next_token]))
 
                                 generated_tokens.append(next_token)
+                                content_tokens.append(next_token)
                                 decoder_input_ids[0][i + 1] = np.array([[next_token]], dtype=np.int64)
 
                                 if next_token == WHISPER_EOT_TOKEN:
                                     break
 
                             # Convert token IDs to text
-                            _LOGGER.info("Generated tokens: %s", generated_tokens)
+                            avg_logit = np.mean(token_logits) if token_logits else 0.0
+                            _LOGGER.info("Generated tokens: %s (avg_logit=%.2f)", generated_tokens, avg_logit)
                             transcription = self.tokenizer.decode(
                                 generated_tokens, skip_special_tokens=True
                             )

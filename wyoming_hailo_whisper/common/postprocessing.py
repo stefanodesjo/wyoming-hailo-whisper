@@ -11,19 +11,20 @@ WHISPER_SPECIAL_TOKEN_START = 50257
 WHISPER_EOT_TOKEN = 50257
 
 
-def apply_repetition_penalty(logits, generated_tokens, penalty=1.5, last_window=8):
+def apply_repetition_penalty(logits, generated_tokens, penalty=1.5, last_window=16):
     """
     Apply frequency-scaled repetition penalty to the logits.
 
     Tokens that appear multiple times in the recent window get exponentially
-    stronger penalties (penalty^count), and tokens repeated more than 3
-    consecutive times are suppressed entirely.
+    stronger penalties (penalty^count). Tokens repeated 3+ consecutive times
+    and tokens forming repeated bigrams are suppressed entirely.
     """
+    from collections import Counter
+
     logits = np.squeeze(logits, axis=0)
     recent_tokens = generated_tokens[-last_window:] if len(generated_tokens) >= last_window else generated_tokens
 
     # Count occurrences for frequency-scaled penalty
-    from collections import Counter
     token_counts = Counter(recent_tokens)
 
     for token, count in token_counts.items():
@@ -35,6 +36,28 @@ def apply_repetition_penalty(logits, generated_tokens, penalty=1.5, last_window=
         last_three = generated_tokens[-3:]
         if last_three[0] == last_three[1] == last_three[2]:
             logits[last_three[0]] = -np.inf
+
+    # N-gram blocking: suppress tokens that would form a repeated bigram or trigram
+    if len(generated_tokens) >= 2:
+        # Bigram blocking: if (prev_token, candidate) already appeared 2+ times, suppress candidate
+        prev_token = generated_tokens[-1]
+        bigram_counts = Counter()
+        for j in range(len(generated_tokens) - 1):
+            bigram_counts[(generated_tokens[j], generated_tokens[j + 1])] += 1
+        for token_id in range(min(len(logits), WHISPER_SPECIAL_TOKEN_START)):
+            if bigram_counts.get((prev_token, token_id), 0) >= 2:
+                logits[token_id] = -np.inf
+
+    if len(generated_tokens) >= 4:
+        # Trigram blocking: if (t-2, t-1, candidate) already appeared, suppress candidate
+        t_minus_2 = generated_tokens[-2]
+        t_minus_1 = generated_tokens[-1]
+        trigram_set = set()
+        for j in range(len(generated_tokens) - 2):
+            trigram_set.add((generated_tokens[j], generated_tokens[j + 1], generated_tokens[j + 2]))
+        for token_id in range(min(len(logits), WHISPER_SPECIAL_TOKEN_START)):
+            if (t_minus_2, t_minus_1, token_id) in trigram_set:
+                logits[token_id] = -np.inf
 
     return logits
 

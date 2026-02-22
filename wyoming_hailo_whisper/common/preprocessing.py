@@ -76,13 +76,12 @@ def improve_input_audio(audio, vad=True, low_audio_gain = True):
     - low_audio_gain: Boolean indicating whether to apply gain if the audio level is low.
     """
     
-    # print(f"Max audio level: {np.max(audio)}")
-    if (low_audio_gain == True) and (np.max(audio) < 0.1):
-        if np.max(audio) < 0.1:
-            audio = apply_gain(audio, gain_db=20)  # Increase by 15 dB
-        elif np.max(audio) < 0.2:
-            audio = apply_gain(audio, gain_db=10)  # Increase by 10 dB
-        _LOGGER.info(f"New max audio level: {np.max(audio)}")
+    if low_audio_gain and np.max(np.abs(audio)) < 0.2:
+        if np.max(np.abs(audio)) < 0.1:
+            audio = apply_gain(audio, gain_db=20)
+        else:
+            audio = apply_gain(audio, gain_db=10)
+        _LOGGER.info(f"Applied gain, new max audio level: {np.max(np.abs(audio))}")
 
     start_time = 0
     if vad:

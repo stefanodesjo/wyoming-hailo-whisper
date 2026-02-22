@@ -2,7 +2,6 @@
 import argparse
 import asyncio
 import logging
-import time
 
 import numpy as np
 from wyoming.asr import Transcribe, Transcript
@@ -89,7 +88,6 @@ class HailoWhisperEventHandler(AsyncEventHandler):
                     _LOGGER.info("Processing mel spectrogram shape: %s, min=%.4f, max=%.4f",
                                  mel.shape, mel.min(), mel.max())
                     self.model.send_data(mel, language=self._language)
-                    time.sleep(0.2)
                     raw_transcription = self.model.get_transcription()
                     _LOGGER.info(raw_transcription)
                     transcription += clean_transcription(raw_transcription)
