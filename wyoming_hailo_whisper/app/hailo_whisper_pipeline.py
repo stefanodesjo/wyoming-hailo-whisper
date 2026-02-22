@@ -100,9 +100,15 @@ class HailoWhisperPipeline:
         """
         Main inference loop for processing input data and generating transcriptions.
         """
+        try:
+            self._run_inference()
+        except Exception:
+            _LOGGER.exception("Inference loop crashed")
+
+    def _run_inference(self):
         params = VDevice.create_params()
         params.scheduling_algorithm = HailoSchedulingAlgorithm.ROUND_ROBIN
-        
+
         if self.multi_process_service:
             params.multi_process_service = True
             params.group_id = "SHARED"
@@ -128,12 +134,17 @@ class HailoWhisperPipeline:
             for output_name in sorted_output_names:
                 decoder_infer_model.output(output_name).set_format_type(FormatType.FLOAT32)
 
-
             useful_outputs = []
             for output_name in sorted_output_names:
                 if "conv" in output_name:
                     useful_outputs.append(output_name)
+            if not useful_outputs:
+                _LOGGER.warning("No 'conv' outputs found, using all outputs: %s", sorted_output_names)
+                useful_outputs = sorted_output_names
             _LOGGER.info("Useful (conv) outputs: %s", useful_outputs)
+
+            _LOGGER.info("Encoder input shape: %s", encoder_infer_model.input().shape)
+            _LOGGER.info("Encoder output shape: %s", encoder_infer_model.output().shape)
 
             with encoder_infer_model.configure() as encoder_configured_infer_model:
                 with decoder_infer_model.configure() as decoder_configured_infer_model:
@@ -144,15 +155,19 @@ class HailoWhisperPipeline:
                         try:
                             # Wait for new data with a timeout to allow clean exit
                             input_mel = self.data_queue.get(timeout=1)
+                        except Empty:
+                            continue
 
-                            transcriptions = []
+                        try:
                             input_mel = np.ascontiguousarray(input_mel)
+                            _LOGGER.info("Input mel shape: %s", input_mel.shape)
                             encoder_bindings.input().set_buffer(input_mel)
                             buffer = np.zeros(encoder_infer_model.output().shape).astype(np.float32)
                             encoder_bindings.output().set_buffer(buffer)
 
                             encoder_configured_infer_model.run([encoder_bindings], self.timeout_ms)
                             encoded_features = encoder_bindings.output().get_buffer()
+                            _LOGGER.info("Encoded features shape: %s", encoded_features.shape)
 
                             # Decoder
                             start_token_id = [50258]
@@ -176,22 +191,19 @@ class HailoWhisperPipeline:
                                     np.zeros(decoder_infer_model.output(name).shape).astype(np.float32) for name in sorted_output_names
                                 ]
 
-                                for name, buffer in zip(sorted_output_names, buffers):
-                                    decoder_bindings.output(name).set_buffer(buffer)
+                                for name, buf in zip(sorted_output_names, buffers):
+                                    decoder_bindings.output(name).set_buffer(buf)
 
-                                decoder_configured_infer_model.run([decoder_bindings], self.timeout_ms)  # run decoder
+                                decoder_configured_infer_model.run([decoder_bindings], self.timeout_ms)
 
                                 decoder_outputs = np.concatenate(
                                     [decoder_bindings.output(name).get_buffer() for name in useful_outputs], axis=2
                                 )
-                                
 
                                 # Decoder post-processing
                                 repetition_penalty = 1.5
                                 logits = apply_repetition_penalty(decoder_outputs[:, i], generated_tokens, penalty=repetition_penalty)
                                 next_token = np.argmax(logits)
-                                #else:
-                                #   next_token = np.argmax(decoder_outputs[0][:, i])
 
                                 generated_tokens.append(next_token)
                                 decoder_input_ids[0][i + 1] = np.array([[next_token]], dtype=np.int64)
@@ -200,15 +212,15 @@ class HailoWhisperPipeline:
                                     break
 
                             # Convert token IDs to text
-                            _LOGGER.debug("Generated tokens: %s", generated_tokens)
+                            _LOGGER.info("Generated tokens: %s", generated_tokens)
                             transcription = self.tokenizer.decode(
                                 generated_tokens, skip_special_tokens=True
                             )
                             _LOGGER.info("Transcription: '%s'", transcription)
                             self.results_queue.put(transcription)
-                            transcriptions.append(transcription)
-                        except Empty:
-                            pass  # No data yet, continue looping
+                        except Exception:
+                            _LOGGER.exception("Error during inference")
+                            self.results_queue.put("")
 
     def get_model_input_audio_length(self):
         """
