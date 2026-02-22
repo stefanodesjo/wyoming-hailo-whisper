@@ -184,7 +184,8 @@ class HailoWhisperPipeline:
                             transcribe_token = 50359
                             notimestamps_token = 50363
 
-                            prefix = [sot_token, language_token, transcribe_token, notimestamps_token]
+                            control_suffix = [sot_token, language_token, transcribe_token, notimestamps_token]
+                            prefix = list(control_suffix)
 
                             if initial_prompt:
                                 startofprev_token = 50361
@@ -236,7 +237,7 @@ class HailoWhisperPipeline:
 
                             active_beams = [{
                                 'ids': initial_ids,
-                                'tokens': list(prefix[1:]),
+                                'tokens': list(control_suffix[1:]),
                                 'content': [],
                                 'score': 0.0,
                             }]
