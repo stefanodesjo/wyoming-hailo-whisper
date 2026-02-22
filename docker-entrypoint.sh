@@ -5,5 +5,5 @@ python3 -m wyoming_hailo_whisper \
     --device 'hailo8' \
     --variant 'base' \
     --language 'sv' \
-    --beam-size 3 \
+    --beam-size 5 \
     --debug
