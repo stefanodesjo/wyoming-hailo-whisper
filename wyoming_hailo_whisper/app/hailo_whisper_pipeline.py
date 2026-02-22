@@ -1,3 +1,4 @@
+import logging
 import numpy as np
 import os
 from hailo_platform import (HEF, VDevice, HailoSchedulingAlgorithm, FormatType)
@@ -5,6 +6,8 @@ from transformers import AutoTokenizer
 from queue import Queue, Empty
 from threading import Thread
 from wyoming_hailo_whisper.common.postprocessing import apply_repetition_penalty
+
+_LOGGER = logging.getLogger(__name__)
 
 
 class HailoWhisperPipeline:
@@ -25,7 +28,7 @@ class HailoWhisperPipeline:
         self.timeout_ms = 100000000
         self.variant = variant
 
-        self.decoding_sequence_length = 32 if self.variant == "tiny" else 24
+        self.decoding_sequence_length = None  # set automatically based on HEF details
         self.host = host  # not used in this version
         self.multi_process_service = multi_process_service
 
@@ -35,6 +38,9 @@ class HailoWhisperPipeline:
 
         self.constant_output_0 = np.array([1])  # Unsqueeze axis
         self._load_tokenizer()
+
+        encoder_hef = HEF(self.encoder_model_path)  # load HEF to get input length
+        self.input_audio_length = int((encoder_hef.get_input_vstream_infos()[0].shape[1]) / 100)  # in seconds
 
         self.data_queue = Queue()
         self.results_queue = Queue()
@@ -105,6 +111,10 @@ class HailoWhisperPipeline:
         decoder_hef = HEF(self.decoder_model_path)
         sorted_output_names = decoder_hef.get_sorted_output_names()
         decoder_model_name = decoder_hef.get_network_group_names()[0]
+        self.decoding_sequence_length = decoder_hef.get_output_vstream_infos()[0].shape[1]
+        _LOGGER.info("Decoder sequence length: %d", self.decoding_sequence_length)
+        _LOGGER.info("Encoder input audio length: %ds", self.input_audio_length)
+        _LOGGER.info("Decoder output names: %s", sorted_output_names)
 
         with VDevice(params) as vdevice:
             encoder_infer_model = vdevice.create_infer_model(self.encoder_model_path)
@@ -123,6 +133,7 @@ class HailoWhisperPipeline:
             for output_name in sorted_output_names:
                 if "conv" in output_name:
                     useful_outputs.append(output_name)
+            _LOGGER.info("Useful (conv) outputs: %s", useful_outputs)
 
             with encoder_infer_model.configure() as encoder_configured_infer_model:
                 with decoder_infer_model.configure() as decoder_configured_infer_model:
@@ -189,13 +200,23 @@ class HailoWhisperPipeline:
                                     break
 
                             # Convert token IDs to text
+                            _LOGGER.debug("Generated tokens: %s", generated_tokens)
                             transcription = self.tokenizer.decode(
                                 generated_tokens, skip_special_tokens=True
                             )
+                            _LOGGER.info("Transcription: '%s'", transcription)
                             self.results_queue.put(transcription)
                             transcriptions.append(transcription)
                         except Empty:
                             pass  # No data yet, continue looping
+
+    def get_model_input_audio_length(self):
+        """
+        Get the expected input audio length for the encoder.
+
+        :return: Input audio length in seconds.
+        """
+        return self.input_audio_length
 
     def send_data(self, data):
         """
