@@ -6,25 +6,46 @@ import re
 
 excluded_tokens = [11, 13]  # Punctuation tokens to exclude from repetition penalty
 
+# All Whisper special tokens start at this ID
+WHISPER_SPECIAL_TOKEN_START = 50257
+WHISPER_EOT_TOKEN = 50257
+
+
 def apply_repetition_penalty(logits, generated_tokens, penalty=1.5, last_window=8):
     """
-    Apply repetition penalty to the logits.
-    Args:
-        logits: The logits from the model (shape: (vocab_size,)).
-        generated_tokens: List of previously generated tokens.
-        penalty: The penalty factor (higher values discourage repetitions).
-    Returns:
-        logits: The logits with repetition penalty applied.
+    Apply frequency-scaled repetition penalty to the logits.
+
+    Tokens that appear multiple times in the recent window get exponentially
+    stronger penalties (penalty^count), and tokens repeated more than 3
+    consecutive times are suppressed entirely.
     """
     logits = np.squeeze(logits, axis=0)
     recent_tokens = generated_tokens[-last_window:] if len(generated_tokens) >= last_window else generated_tokens
 
-    # Combine the tokens from both windows
-    recent_tokens = set(recent_tokens)
+    # Count occurrences for frequency-scaled penalty
+    from collections import Counter
+    token_counts = Counter(recent_tokens)
 
-    for token in recent_tokens:
-        if token not in excluded_tokens:
-            logits[token] /= penalty
+    for token, count in token_counts.items():
+        if token not in excluded_tokens and token < WHISPER_SPECIAL_TOKEN_START:
+            logits[token] /= penalty ** count
+
+    # Suppress tokens repeated more than 3 consecutive times
+    if len(generated_tokens) >= 3:
+        last_three = generated_tokens[-3:]
+        if last_three[0] == last_three[1] == last_three[2]:
+            logits[last_three[0]] = -np.inf
+
+    return logits
+
+
+def suppress_special_tokens(logits, allow_eot=True):
+    """
+    Suppress all special tokens during content generation.
+    Optionally allows EOT to remain unsuppressed.
+    """
+    start = WHISPER_EOT_TOKEN + 1 if allow_eot else WHISPER_EOT_TOKEN
+    logits[start:] = -np.inf
     return logits
 
 def temperature_sampling(logits, temperature=0.0):

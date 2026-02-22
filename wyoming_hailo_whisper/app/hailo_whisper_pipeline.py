@@ -5,7 +5,7 @@ from hailo_platform import (HEF, VDevice, HailoSchedulingAlgorithm, FormatType)
 from transformers import AutoTokenizer
 from queue import Queue, Empty
 from threading import Thread
-from wyoming_hailo_whisper.common.postprocessing import apply_repetition_penalty
+from wyoming_hailo_whisper.common.postprocessing import apply_repetition_penalty, suppress_special_tokens, WHISPER_EOT_TOKEN
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -221,8 +221,15 @@ class HailoWhisperPipeline:
                                     _LOGGER.info("Decoder output shape (concat): %s", decoder_outputs.shape)
 
                                 # Decoder post-processing
+                                content_tokens_generated = i - first_decode_pos
                                 repetition_penalty = 1.5
                                 logits = apply_repetition_penalty(decoder_outputs[:, i], generated_tokens, penalty=repetition_penalty)
+
+                                # Suppress non-text special tokens during content generation
+                                # Allow EOT only after at least 1 content token
+                                allow_eot = content_tokens_generated >= 1
+                                logits = suppress_special_tokens(logits, allow_eot=allow_eot)
+
                                 top5_indices = np.argsort(logits)[-5:][::-1]
                                 top5_values = logits[top5_indices]
                                 top5_tokens = [self.tokenizer.decode([idx]) for idx in top5_indices]
@@ -233,7 +240,7 @@ class HailoWhisperPipeline:
                                 generated_tokens.append(next_token)
                                 decoder_input_ids[0][i + 1] = np.array([[next_token]], dtype=np.int64)
 
-                                if next_token == self.tokenizer.eos_token_id:
+                                if next_token == WHISPER_EOT_TOKEN:
                                     break
 
                             # Convert token IDs to text
