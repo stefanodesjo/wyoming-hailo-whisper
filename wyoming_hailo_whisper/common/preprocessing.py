@@ -3,6 +3,7 @@
 import wyoming_hailo_whisper.common.audio_utils as audio_utils
 import numpy as np
 import logging
+from scipy.signal import butter, sosfilt, stft, istft
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -67,25 +68,103 @@ def apply_gain(audio, gain_db):
     return audio * gain_linear
 
 
-def improve_input_audio(audio, vad=True, low_audio_gain = True):
+def highpass_filter(audio, sample_rate, cutoff=80, order=5):
     """
-    Improve the input audio by applying gain and detecting speech.
-    Parameters:
-    - audio: The audio sample.
-    - vad: Boolean indicating whether to apply voice activity detection (VAD).
-    - low_audio_gain: Boolean indicating whether to apply gain if the audio level is low.
+    Remove frequencies below cutoff Hz (DC offset, rumble, mains hum).
     """
-    
-    if low_audio_gain and np.max(np.abs(audio)) < 0.2:
-        if np.max(np.abs(audio)) < 0.1:
-            audio = apply_gain(audio, gain_db=20)
-        else:
-            audio = apply_gain(audio, gain_db=10)
-        _LOGGER.info(f"Applied gain, new max audio level: {np.max(np.abs(audio))}")
+    sos = butter(order, cutoff, btype='highpass', fs=sample_rate, output='sos')
+    return sosfilt(sos, audio).astype(np.float32)
+
+
+def rms_normalize(audio, target_rms=0.1, max_gain_db=30):
+    """
+    Normalize audio to a target RMS level for consistent input volume.
+    Limits gain to max_gain_db to avoid over-amplifying noise.
+    """
+    current_rms = np.sqrt(np.mean(audio ** 2))
+    if current_rms < 1e-8:
+        return audio  # silence, don't amplify
+    gain = target_rms / current_rms
+    max_gain_linear = 10 ** (max_gain_db / 20)
+    gain = min(gain, max_gain_linear)
+    return np.clip(audio * gain, -1.0, 1.0).astype(np.float32)
+
+
+def spectral_noise_reduce(audio, sample_rate, spectral_floor=0.08):
+    """
+    Reduce stationary background noise using Wiener-like spectral masking.
+
+    Estimates the noise spectrum from the quietest 20% of STFT frames,
+    then applies a soft gain mask based on per-frame SNR. This is
+    conservative to avoid removing speech or introducing artifacts.
+    """
+    nperseg = 512
+    noverlap = nperseg // 2
+
+    f, t, Zxx = stft(audio, fs=sample_rate, nperseg=nperseg, noverlap=noverlap)
+    magnitude = np.abs(Zxx)
+    phase = np.angle(Zxx)
+
+    # Estimate noise from the quietest 20% of frames
+    frame_energy = np.sum(magnitude ** 2, axis=0)
+    n_noise_frames = max(1, int(0.2 * len(frame_energy)))
+    noise_frame_indices = np.argsort(frame_energy)[:n_noise_frames]
+    noise_spectrum = np.mean(magnitude[:, noise_frame_indices], axis=1, keepdims=True)
+
+    # Wiener-like soft mask: gain = SNR / (SNR + 1)
+    noise_power = noise_spectrum ** 2 + 1e-10
+    signal_power = magnitude ** 2
+    snr = signal_power / noise_power
+    gain = snr / (snr + 1.0)
+    gain = np.maximum(gain, spectral_floor)
+
+    clean_Zxx = magnitude * gain * np.exp(1j * phase)
+    _, clean_audio = istft(clean_Zxx, fs=sample_rate, nperseg=nperseg, noverlap=noverlap)
+
+    # Match original length
+    if len(clean_audio) > len(audio):
+        clean_audio = clean_audio[:len(audio)]
+    elif len(clean_audio) < len(audio):
+        clean_audio = np.pad(clean_audio, (0, len(audio) - len(clean_audio)))
+
+    return clean_audio.astype(np.float32)
+
+
+def improve_input_audio(audio, vad=True, enhance=True):
+    """
+    Improve the input audio quality before transcription.
+
+    Processing pipeline:
+    1. High-pass filter (remove DC offset, rumble, mains hum)
+    2. Spectral noise reduction (reduce stationary background noise)
+    3. RMS normalization (consistent input level)
+    4. Voice activity detection (find speech onset)
+    """
+    sample_rate = audio_utils.SAMPLE_RATE
+
+    if enhance:
+        peak_before = np.max(np.abs(audio))
+        rms_before = np.sqrt(np.mean(audio ** 2))
+        _LOGGER.info("Audio before enhancement: peak=%.4f, rms=%.4f, samples=%d",
+                     peak_before, rms_before, len(audio))
+
+        # 1. High-pass filter: remove DC offset and low-frequency noise
+        audio = highpass_filter(audio, sample_rate, cutoff=80)
+
+        # 2. Spectral noise reduction: reduce stationary background noise
+        audio = spectral_noise_reduce(audio, sample_rate)
+
+        # 3. RMS normalization: ensure consistent input level
+        audio = rms_normalize(audio, target_rms=0.1)
+
+        peak_after = np.max(np.abs(audio))
+        rms_after = np.sqrt(np.mean(audio ** 2))
+        _LOGGER.info("Audio after enhancement: peak=%.4f, rms=%.4f",
+                     peak_after, rms_after)
 
     start_time = 0
     if vad:
-        start_time = detect_first_speech(audio, audio_utils.SAMPLE_RATE, threshold=0.2, frame_duration=0.2)
+        start_time = detect_first_speech(audio, sample_rate, threshold=0.2, frame_duration=0.2)
         if start_time is not None:
             _LOGGER.info(f"Speech detected at {start_time:.2f} seconds.")
         else:
