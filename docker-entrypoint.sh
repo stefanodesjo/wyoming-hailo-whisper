@@ -12,6 +12,10 @@ if [ "${WHISPER_USE_CPU:-false}" = "true" ]; then
     ARGS+=(--use-cpu)
 fi
 
+if [ "${WHISPER_ENHANCE_AUDIO:-true}" = "true" ]; then
+    ARGS+=(--enhance-audio)
+fi
+
 if [ "${WHISPER_DEBUG:-true}" = "true" ]; then
     ARGS+=(--debug)
 fi

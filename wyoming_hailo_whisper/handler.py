@@ -58,7 +58,8 @@ class HailoWhisperEventHandler(AsyncEventHandler):
             _LOGGER.debug("Audio stopped")
             text = ""
             sampled_audio = np.frombuffer(self.audio, dtype=np.int16).flatten().astype(np.float32) / 32768.0
-            sampled_audio, start_time = improve_input_audio(sampled_audio, vad=True)
+            enhance = getattr(self.cli_args, 'enhance_audio', False)
+            sampled_audio, start_time = improve_input_audio(sampled_audio, vad=True, enhance=enhance)
 
             if start_time is None:
                 _LOGGER.info("No speech detected in audio")

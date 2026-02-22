@@ -82,6 +82,11 @@ async def main() -> None:
         default=1,
         help="Beam size for decoding (default: 1 = greedy). Higher values improve accuracy at cost of speed. Works with both Hailo and CPU modes."
     )
+    parser.add_argument(
+        "--enhance-audio",
+        action="store_true",
+        help="Enable audio enhancement (high-pass filter, noise reduction, normalization)"
+    )
     parser.add_argument("--debug", action="store_true", help="Log DEBUG messages")
     parser.add_argument(
         "--log-format", default=logging.BASIC_FORMAT, help="Format for log messages"
