@@ -199,7 +199,12 @@ class HailoWhisperPipeline:
 
                             # Run Decoder Iteratively (skip forced prefix positions)
                             for i in range(first_decode_pos, self.decoding_sequence_length - 1):
-                                tokenized_ids = self._tokenization(decoder_input_ids, add_embed=False)
+                                tokenized_ids = self._tokenization(decoder_input_ids, add_embed=True)
+
+                                if i == first_decode_pos:
+                                    _LOGGER.info("Tokenized ids shape: %s, min=%.6f, max=%.6f, mean=%.6f",
+                                                 tokenized_ids.shape, tokenized_ids.min(),
+                                                 tokenized_ids.max(), tokenized_ids.mean())
 
                                 decoder_bindings.input(f"{decoder_model_name}/input_layer1").set_buffer(encoded_features)
                                 decoder_bindings.input(f"{decoder_model_name}/input_layer2").set_buffer(tokenized_ids)
