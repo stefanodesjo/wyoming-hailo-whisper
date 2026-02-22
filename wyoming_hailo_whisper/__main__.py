@@ -58,8 +58,8 @@ async def main() -> None:
         "--variant",
         type=str,
         default="base",
-        choices=["base", "tiny"],
-        help="Whisper variant to use (default: base)"
+        choices=["tiny", "base", "small", "medium", "large-v3"],
+        help="Whisper variant to use (default: base). Hailo mode only supports tiny/base. CPU mode supports all variants."
     )
     parser.add_argument(
         "--language",
@@ -142,6 +142,9 @@ async def main() -> None:
         whisper_model = CpuWhisperPipeline(variant=args.variant, beam_size=args.beam_size)
         _LOGGER.info("Mode: CPU (beam_size=%d)", args.beam_size)
     else:
+        hailo_variants = {"tiny", "base"}
+        if args.variant not in hailo_variants:
+            parser.error(f"Hailo mode only supports variants {sorted(hailo_variants)}. Use --use-cpu for '{args.variant}'.")
         encoder_path = get_hef_path(args.variant, args.device, "encoder")
         decoder_path = get_hef_path(args.variant, args.device, "decoder")
         whisper_model = HailoWhisperPipeline(encoder_path, decoder_path, args.variant, multi_process_service=args.multi_process_service, beam_size=args.beam_size)
