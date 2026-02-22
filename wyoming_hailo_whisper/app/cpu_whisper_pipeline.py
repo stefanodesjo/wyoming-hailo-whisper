@@ -62,6 +62,7 @@ class CpuWhisperPipeline:
                     forced_decoder_ids=forced_decoder_ids,
                     num_beams=self.beam_size,
                     max_new_tokens=224,
+                    no_repeat_ngram_size=3,
                 )
 
                 if initial_prompt:

@@ -191,16 +191,24 @@ class HailoWhisperPipeline:
                                 prompt_token_ids = self.tokenizer.encode(
                                     initial_prompt, add_special_tokens=False
                                 )
-                                # Truncate prompt if prefix would exceed half the decoding sequence length
-                                max_prompt_tokens = self.decoding_sequence_length // 2 - len(prefix) - 1
-                                if len(prompt_token_ids) > max_prompt_tokens:
-                                    _LOGGER.warning(
-                                        "Truncating initial prompt from %d to %d tokens",
+                                # Reserve minimum output slots; use the rest for prompt context
+                                min_output_tokens = 6
+                                # Total budget: decoding_sequence_length - min_output_tokens
+                                # Prefix overhead: 1 (startofprev) + 4 (sot/lang/transcribe/notimestamps)
+                                max_prompt_tokens = self.decoding_sequence_length - min_output_tokens - len(prefix) - 1
+                                if max_prompt_tokens < 1:
+                                    _LOGGER.warning("Sequence length %d too short for prompt, skipping",
+                                                    self.decoding_sequence_length)
+                                    prompt_token_ids = []
+                                elif len(prompt_token_ids) > max_prompt_tokens:
+                                    _LOGGER.info(
+                                        "Truncating initial prompt from %d to last %d tokens",
                                         len(prompt_token_ids), max_prompt_tokens,
                                     )
-                                    prompt_token_ids = prompt_token_ids[:max_prompt_tokens]
-                                prefix = [startofprev_token] + prompt_token_ids + prefix
-                                _LOGGER.info("Prompt prefix: %d prompt tokens + 4 control tokens", len(prompt_token_ids))
+                                    prompt_token_ids = prompt_token_ids[-max_prompt_tokens:]
+                                if prompt_token_ids:
+                                    prefix = [startofprev_token] + prompt_token_ids + prefix
+                                    _LOGGER.info("Prompt prefix: %d prompt tokens + 4 control tokens", len(prompt_token_ids))
 
                             _LOGGER.info("Forced prefix: %s (language=%s)", prefix, language)
 
