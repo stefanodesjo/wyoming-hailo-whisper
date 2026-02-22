@@ -66,23 +66,29 @@ class HailoWhisperPipeline:
         """
         self.tokenizer = AutoTokenizer.from_pretrained(f"openai/whisper-{self.variant}")
 
-    def _tokenization(self, decoder_input_ids):
+    def _tokenization(self, decoder_input_ids, add_embed=True):
         """
         Perform tokenization operations.
 
         :param decoder_input_ids: Input token IDs for the decoder.
+        :param add_embed: Whether to add positional embedding bias.
         :return: Transposed tokenized output.
         """
         # embedding lookup
         gather_output = self.token_embedding_weight[decoder_input_ids]  # Shape: (len(decoder_input_ids), 384)
-        # Add bias
-        add_output = gather_output + self.onnx_add_input  # Broadcasting with shape (32, 384)
-        # insert dimension at axis=1
-        unsqueeze_output = np.expand_dims(add_output, axis=int(self.constant_output_0[0]))  # Shape: (32, 1, 384)
-        # Transpose (0, 3, 2, 1) + turn into NHWC (0, 2, 3, 1)
-        transpose_output = np.transpose(unsqueeze_output, (0, 2, 1, 3))
 
-        return transpose_output
+        if add_embed:
+            # Add bias
+            add_output = gather_output + self.onnx_add_input  # Broadcasting with shape (32, 384)
+            # insert dimension at axis=1
+            unsqueeze_output = np.expand_dims(add_output, axis=int(self.constant_output_0[0]))  # Shape: (32, 1, 384)
+            # Transpose (0, 3, 2, 1) + turn into NHWC (0, 2, 3, 1)
+            transpose_output = np.transpose(unsqueeze_output, (0, 2, 1, 3))
+            return transpose_output
+        else:
+            # insert dimension at axis=0
+            unsqueeze_output = np.expand_dims(gather_output, axis=0)
+            return unsqueeze_output
 
     def _inference_loop(self):
         """
@@ -112,6 +118,11 @@ class HailoWhisperPipeline:
             for output_name in sorted_output_names:
                 decoder_infer_model.output(output_name).set_format_type(FormatType.FLOAT32)
 
+
+            useful_outputs = []
+            for output_name in sorted_output_names:
+                if "conv" in output_name:
+                    useful_outputs.append(output_name)
 
             with encoder_infer_model.configure() as encoder_configured_infer_model:
                 with decoder_infer_model.configure() as decoder_configured_infer_model:
@@ -145,7 +156,7 @@ class HailoWhisperPipeline:
                             decoder_outputs = None
                             # Run Decoder Iteratively
                             for i in range(self.decoding_sequence_length - 1):
-                                tokenized_ids = self._tokenization(decoder_input_ids)
+                                tokenized_ids = self._tokenization(decoder_input_ids, add_embed=False)
 
                                 decoder_bindings.input(f"{decoder_model_name}/input_layer1").set_buffer(encoded_features)
                                 decoder_bindings.input(f"{decoder_model_name}/input_layer2").set_buffer(tokenized_ids)
@@ -160,7 +171,7 @@ class HailoWhisperPipeline:
                                 decoder_configured_infer_model.run([decoder_bindings], self.timeout_ms)  # run decoder
 
                                 decoder_outputs = np.concatenate(
-                                    [decoder_bindings.output(name).get_buffer() for name in sorted_output_names], axis=2
+                                    [decoder_bindings.output(name).get_buffer() for name in useful_outputs], axis=2
                                 )
                                 
 

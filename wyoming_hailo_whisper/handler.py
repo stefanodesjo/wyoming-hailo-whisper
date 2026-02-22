@@ -1,10 +1,8 @@
 """Event handler for clients of the server."""
 import argparse
 import asyncio
-import io
 import logging
 import time
-import wave
 
 import numpy as np
 from wyoming.asr import Transcribe, Transcript
@@ -63,47 +61,40 @@ class HailoWhisperEventHandler(AsyncEventHandler):
         if AudioStop.is_type(event.type):
             _LOGGER.debug("Audio stopped")
             text = ""
-            with io.BytesIO() as wav_io:
-                wav_file: wave.Wave_write = wave.open(wav_io, "wb")
-                with wav_file:
-                    wav_file.setframerate(16000)
-                    wav_file.setsampwidth(2)
-                    wav_file.setnchannels(1)
-                    wav_file.writeframes(self.audio)
+            sampled_audio = np.frombuffer(self.audio, dtype=np.int16).flatten().astype(np.float32) / 32768.0
+            sampled_audio, start_time = improve_input_audio(sampled_audio, vad=True)
 
-                wav_io.seek(0)
-                wav_bytes = wav_io.getvalue()
+            if start_time is None:
+                _LOGGER.info("No speech detected in audio")
+                self.audio = bytes()
+                await self.write_event(Transcript(text="").event())
+                return False
 
-                sampled_audio = np.frombuffer(wav_bytes, dtype=np.int16).flatten().astype(np.float32) / 32768.0
-                sampled_audio, start_time = improve_input_audio(sampled_audio, vad=True)
+            chunk_offset = start_time - 0.2
+            if chunk_offset < 0:
+                chunk_offset = 0
 
-                chunk_offset = start_time - 0.2
-                if chunk_offset < 0:
-                    chunk_offset = 0
+            chunk_length = 10 if self.cli_args.variant == "tiny" else 5
 
-                chunk_length = 10  if self.cli_args.variant == "tiny" else 5
+            mel_spectrograms = preprocess(
+                sampled_audio,
+                True,
+                chunk_length=chunk_length,
+                chunk_offset=chunk_offset
+            )
 
-                mel_spectrograms = preprocess(
-                    sampled_audio,
-                    True,#self.is_nhwc,
-                    chunk_length=chunk_length,
-                    chunk_offset=chunk_offset
-                )
-                #assert self.model_proc.stdin is not None
-                #assert self.model_proc.stdout is not None
+            async with self.model_lock:
+                transcription = ""
+                _LOGGER.info(f"Processing mel spectrograms: {len(mel_spectrograms)}")
+                for mel in mel_spectrograms:
+                    _LOGGER.info(f"Processing mel spectrogram: {mel}")
+                    self.model.send_data(mel)
+                    time.sleep(0.2)
+                    raw_transcription = self.model.get_transcription()
+                    _LOGGER.info(raw_transcription)
+                    transcription += clean_transcription(raw_transcription)
 
-                async with self.model_lock:
-                    transcription = ""
-                    _LOGGER.info(f"Processing mel spectrograms: {len(mel_spectrograms)}")
-                    for mel in mel_spectrograms:
-                        _LOGGER.info(f"Processing mel spectrogram: {mel}")
-                        self.model.send_data(mel)
-                        time.sleep(0.2)
-                        raw_transcription = self.model.get_transcription()
-                        _LOGGER.info(raw_transcription)
-                        transcription += clean_transcription(raw_transcription)
-
-                text = transcription.replace("[BLANK_AUDIO]", "").strip()
+            text = transcription.replace("[BLANK_AUDIO]", "").strip()
 
             _LOGGER.info(text)
 
