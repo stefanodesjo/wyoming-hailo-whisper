@@ -13,9 +13,9 @@ Familiarize yourself with the [HA AddOn official guide](https://developers.home-
 4. Create inside `wyoming-hailo-whisper` the folder `hailo_packages`
 5. Download in the folder `hailo_packages` the following packages from [Hailo Developer Zone](https://hailo.ai/developer-zone/) (requires authentication, filter with HailoRT/ARM64/Linux/Python3.10)
 
-*HailoRT version 4.21* 
-- hailort_4.21.0_arm64.deb
-- hailort-4.21.0-cp310-cp310-linux_aarch64.whl
+*HailoRT version 4.23* 
+- hailort_4.23.0_arm64.deb
+- hailort-4.23.0-cp310-cp310-linux_aarch64.whl
 
 6. Proceed from now on with [HA AddOn official guide, step 2](https://developers.home-assistant.io/docs/add-ons/tutorial#step-2-installing-and-testing-your-add-on)
 7. Use HA Configure panel to configure Hailo device (`hailo8l` or `hailo8`) and Whisper model (`tiny` or `base`)
